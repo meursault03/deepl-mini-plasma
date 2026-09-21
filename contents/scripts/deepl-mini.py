@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import urllib.error
@@ -11,15 +12,18 @@ import urllib.request
 
 
 API_URL = "https://api-free.deepl.com/v2/translate"
+VERSION = "3.2.0"
 REQUEST_TIMEOUT_SECONDS = 8
+MAX_REQUEST_BYTES = 128 * 1024
 SECRET_ATTRIBUTES = ("service", "deepl-mini", "account", "default")
-ALLOWED_TARGET_LANGUAGES = frozenset(
-    {"EN-US", "EN-GB", "PT-BR", "ES", "FR", "DE", "IT", "JA"}
-)
+TARGET_LANGUAGE_PATTERN = re.compile(r"^[A-Z]{2,3}(?:-[A-Z0-9]{2,4})?$")
 
 ERROR_MESSAGES = {
     400: "DeepL rejected the text or request.",
     403: "The DeepL API key is invalid or unauthorized.",
+    404: "The DeepL API endpoint could not be found.",
+    413: "The translation request is too large.",
+    414: "The translation request is too large.",
     429: "Too many requests to the DeepL API. Please try again shortly.",
     456: "The monthly DeepL API limit has been reached.",
     500: "The DeepL service returned a temporary error.",
@@ -75,29 +79,46 @@ def emit_key_status():
     return 0
 
 
+def prompt_for_api_key():
+    prompt_commands = (
+        [
+            "zenity",
+            "--forms",
+            "--title=DeepL Mini — Set API key",
+            "--text=Enter your DeepL API key. It will be stored securely in your system keyring.",
+            "--add-password=API key",
+            "--ok-label=Save API key",
+            "--cancel-label=Cancel",
+            "--width=480",
+        ],
+        [
+            "kdialog",
+            "--title",
+            "DeepL Mini — Set API key",
+            "--password",
+            "Enter your DeepL API key:",
+        ],
+    )
+    for command in prompt_commands:
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            ), None
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            return None, "API key setup timed out."
+    return None, "Install Zenity or KDialog to configure an API key."
+
+
 def setup_api_key():
-    try:
-        prompt = subprocess.run(
-            [
-                "zenity",
-                "--forms",
-                "--title=DeepL Mini — Set API key",
-                "--text=Enter your DeepL API key. It will be stored securely in your system keyring.",
-                "--add-password=API key",
-                "--ok-label=Save API key",
-                "--cancel-label=Cancel",
-                "--width=480",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-    except FileNotFoundError:
-        print("A secure API-key dialog is not available.", file=sys.stderr)
-        return 1
-    except subprocess.TimeoutExpired:
-        print("API key setup timed out.", file=sys.stderr)
+    prompt, prompt_error = prompt_for_api_key()
+    if prompt_error:
+        print(prompt_error, file=sys.stderr)
         return 1
 
     if prompt.returncode != 0 or not prompt.stdout.strip():
@@ -138,9 +159,25 @@ def response_message(status, body):
         detail = parsed.get("message")
         if detail:
             return str(detail)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError, UnicodeDecodeError):
         pass
-    return f"A API DeepL respondeu com HTTP {status}."
+    return f"The DeepL API returned HTTP {status}."
+
+
+def extract_translation(parsed):
+    if not isinstance(parsed, dict):
+        return None
+    translations = parsed.get("translations")
+    if not isinstance(translations, list) or not translations:
+        return None
+    first_translation = translations[0]
+    if not isinstance(first_translation, dict):
+        return None
+    text = first_translation.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    detected_source = first_translation.get("detected_source_language", "")
+    return text, detected_source if isinstance(detected_source, str) else ""
 
 
 def translate(request_id, encoded_text, target_language):
@@ -153,16 +190,9 @@ def translate(request_id, encoded_text, target_language):
     if not text.strip():
         emit({"ok": True, "request_id": request_id, "translation": ""})
         return 0
-    if len(text) > 30000:
-        emit_error(request_id, "The text is too large for the widget popup.")
-        return 0
-    if target_language not in ALLOWED_TARGET_LANGUAGES:
+    target_language = str(target_language).upper()
+    if not TARGET_LANGUAGE_PATTERN.fullmatch(target_language):
         emit_error(request_id, "The selected target language is not supported.")
-        return 0
-
-    api_key, key_error = read_api_key()
-    if key_error:
-        emit_error(request_id, key_error)
         return 0
 
     payload = json.dumps(
@@ -172,6 +202,15 @@ def translate(request_id, encoded_text, target_language):
         },
         ensure_ascii=False,
     ).encode("utf-8")
+    if len(payload) > MAX_REQUEST_BYTES:
+        emit_error(request_id, "The translation request is too large.", 413)
+        return 0
+
+    api_key, key_error = read_api_key()
+    if key_error:
+        emit_error(request_id, key_error)
+        return 0
+
     request = urllib.request.Request(
         API_URL,
         data=payload,
@@ -179,6 +218,7 @@ def translate(request_id, encoded_text, target_language):
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Authorization": f"DeepL-Auth-Key {api_key}",
+            "User-Agent": f"DeepL-Mini/{VERSION}",
         },
         method="POST",
     )
@@ -187,16 +227,17 @@ def translate(request_id, encoded_text, target_language):
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             body = response.read()
         parsed = json.loads(body.decode("utf-8"))
-        translations = parsed.get("translations") or []
-        if not translations or not translations[0].get("text"):
+        translation = extract_translation(parsed)
+        if translation is None:
             emit_error(request_id, "The DeepL API did not return a translation.")
             return 0
+        translated_text, detected_source = translation
         emit(
             {
                 "ok": True,
                 "request_id": request_id,
-                "translation": translations[0]["text"],
-                "detected_source": translations[0].get("detected_source_language", ""),
+                "translation": translated_text,
+                "detected_source": detected_source,
             }
         )
     except urllib.error.HTTPError as error:
@@ -206,10 +247,12 @@ def translate(request_id, encoded_text, target_language):
         emit_error(request_id, "Could not connect to the DeepL API.")
     except TimeoutError:
         emit_error(request_id, "The DeepL API exceeded the 8-second timeout.")
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         emit_error(request_id, "The DeepL API returned an invalid response.")
     except OSError:
         emit_error(request_id, "Could not complete the request to the DeepL API.")
+    except Exception:
+        emit_error(request_id, "The DeepL helper encountered an unexpected error.")
 
     return 0
 
@@ -222,7 +265,7 @@ def main():
     parser.add_argument("--request-id", type=int, default=0)
     parser.add_argument("--text-urlencoded")
     parser.add_argument("--target-lang", default="EN-US")
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
     if args.check:
         print(f"DeepL Mini API client: {API_URL}")
@@ -231,7 +274,7 @@ def main():
         return emit_key_status()
     if args.setup:
         return setup_api_key()
-    if unknown or args.text_urlencoded is None:
+    if args.text_urlencoded is None:
         print("usage: deepl-mini.py --request-id N --text-urlencoded TEXT", file=sys.stderr)
         return 2
     return translate(args.request_id, args.text_urlencoded, args.target_lang)

@@ -7,7 +7,7 @@ DeepL Mini uses a native QML popup. It does not embed Chromium or QtWebEngine. A
 ## Features
 
 - Automatic source-language detection.
-- English (US/UK), Portuguese (Brazil), Spanish, French, German, Italian, and Japanese target languages.
+- A searchable selector containing the current stable DeepL target-language catalog.
 - Optional automatic translation with a configurable typing delay.
 - Manual translation, clear, and copy controls.
 - Explicit handling for DeepL API errors, including monthly quota exhaustion.
@@ -26,13 +26,13 @@ The API key is never written to Plasma's configuration file, the widget director
 - KDE Plasma 6.
 - Python 3 (only the standard library is used).
 - `secret-tool` from libsecret, with a Secret Service-compatible keyring available in the user session.
-- `zenity` for the secure API-key entry dialog.
+- Zenity or KDialog for the secure API-key entry dialog.
 - A personal DeepL API Free key.
 
 ## Install from source
 
 ```sh
-git clone <your-repository-url> deepl-mini
+git clone https://github.com/meursault03/deepl-mini-plasma.git deepl-mini
 cd deepl-mini
 kpackagetool6 --type Plasma/Applet --install "$PWD"
 ```
@@ -45,23 +45,18 @@ Then add **DeepL Mini** from Plasma's widget picker. Open its configuration page
 
 ```sh
 python3 -m py_compile contents/scripts/deepl-mini.py
-qmllint contents/ui/main.qml contents/ui/configGeneral.qml contents/ui/configApi.qml
-kpackagetool6 --type Plasma/Applet --show io.meursault.panel.deeplqt
+python3 -m unittest discover -s tests -v
+xmllint --noout contents/config/main.xml
+/usr/lib/qt6/bin/qmllint contents/ui/*.qml
 ```
 
-## Publish on GitHub
+## Language catalog
 
-Before the first public push, make sure no local API key or generated archive is staged:
+The widget ships a static snapshot of DeepL's stable text-translation target languages. This keeps the popup fast and avoids a network request solely to populate the picker. The snapshot is updated in releases when DeepL adds or changes supported languages.
 
-```sh
-git init
-git add .
-git status
-git commit -m "Initial public release"
-gh repo create deepl-mini --public --source=. --remote=origin --push
-```
+## Continuous integration
 
-Replace `deepl-mini` with the desired repository name. `gh` is optional; creating an empty repository on GitHub and then adding its remote works too.
+GitHub Actions runs the helper tests, catalog checks, XML validation, QML linting, and Plasma package installation check for every push and pull request.
 
 ## License
 

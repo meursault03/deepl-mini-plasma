@@ -6,36 +6,34 @@ import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasmoid
 import org.kde.plasma.plasma5support as Plasma5Support
+import "Command.js" as Command
+import "TargetLanguages.js" as TargetLanguages
 
 PlasmoidItem {
     id: root
 
-    property string errorText: ""
+    property string messageText: ""
+    property bool messageIsError: false
     property string resultText: ""
     property string activeCommand: ""
     property string lastRequestedText: ""
     property string lastRequestedTargetLanguage: ""
     property string activeRequestText: ""
+    property string activeRequestTargetLanguage: ""
     property string currentInputText: ""
     property string inputText: ""
-    readonly property string targetLanguage: Plasmoid.configuration.targetLanguage || "EN-US"
+    readonly property string targetLanguage: TargetLanguages.normalize(Plasmoid.configuration.targetLanguage)
     readonly property bool autoTranslate: Plasmoid.configuration.autoTranslate !== false
     readonly property int debounceMilliseconds: Math.max(
         200, Number(Plasmoid.configuration.debounceMilliseconds) || 700)
     property int requestId: 0
     property bool busy: false
     property bool configuringKey: false
-
-    readonly property var targetLanguageCodes: ["EN-US", "EN-GB", "PT-BR", "ES", "FR", "DE", "IT", "JA"]
-    readonly property var targetLanguageLabels: [
-        i18n("English (US)"), i18n("English (UK)"),
-        i18n("Portuguese (Brazil)"), i18n("Spanish"),
-        i18n("French"), i18n("German"), i18n("Italian"), i18n("Japanese")
-    ]
+    property bool copyFeedbackVisible: false
 
     readonly property string helperPath: Qt.resolvedUrl("../scripts/deepl-mini.py")
         .toString().replace(/^file:\/\//, "")
-    readonly property string setupCommand: "python3 \"" + helperPath + "\" --setup"
+    readonly property string setupCommand: Command.build(["python3", helperPath, "--setup"])
 
     function cancelActiveCommand() {
         if (activeCommand)
@@ -51,15 +49,18 @@ PlasmoidItem {
         lastRequestedText = ""
         lastRequestedTargetLanguage = ""
         activeRequestText = ""
+        activeRequestTargetLanguage = ""
         resultText = ""
-        errorText = ""
+        messageText = ""
+        messageIsError = false
         debounceTimer.stop()
     }
 
     function handleInputChanged(text) {
         inputText = text
         currentInputText = text.trim()
-        errorText = ""
+        messageText = ""
+        messageIsError = false
         if (!currentInputText) {
             clearTranslation()
             return
@@ -72,45 +73,54 @@ PlasmoidItem {
             debounceTimer.stop()
     }
 
-    function translateNow() {
+    function translateNow(requestedTargetLanguage) {
         const value = inputText.trim()
+        const target = TargetLanguages.normalize(requestedTargetLanguage || targetLanguage)
         if (!value)
             return clearTranslation()
         if (value === lastRequestedText &&
-                targetLanguage === lastRequestedTargetLanguage && resultText)
+                target === lastRequestedTargetLanguage && resultText)
             return
 
         cancelActiveCommand()
         requestId += 1
         lastRequestedText = value
-        lastRequestedTargetLanguage = targetLanguage
+        lastRequestedTargetLanguage = target
         activeRequestText = value
+        activeRequestTargetLanguage = target
         resultText = ""
-        errorText = ""
+        messageText = ""
+        messageIsError = false
         busy = true
-        activeCommand = "python3 \"" + helperPath + "\" --request-id " + requestId +
-            " --target-lang " + targetLanguage +
-            " --text-urlencoded \"" + encodeURIComponent(value) + "\""
+        activeCommand = Command.build([
+            "python3", helperPath,
+            "--request-id", String(requestId),
+            "--target-lang", target,
+            "--text-urlencoded", encodeURIComponent(value)
+        ])
         executable.connectSource(activeCommand)
     }
 
     function setTargetLanguage(language) {
-        if (language === targetLanguage)
+        const target = TargetLanguages.normalize(language)
+        if (target === targetLanguage)
             return
-        Plasmoid.configuration.targetLanguage = language
+        Plasmoid.configuration.targetLanguage = target
         lastRequestedText = ""
         lastRequestedTargetLanguage = ""
         resultText = ""
-        errorText = ""
+        messageText = ""
+        messageIsError = false
         if (currentInputText)
-            translateNow()
+            translateNow(target)
     }
 
     function configureKey() {
         cancelActiveCommand()
         configuringKey = true
         busy = true
-        errorText = ""
+        messageText = ""
+        messageIsError = false
         activeCommand = setupCommand
         executable.connectSource(activeCommand)
     }
@@ -133,7 +143,7 @@ PlasmoidItem {
     }
 
     toolTipMainText: i18n("DeepL Mini")
-    toolTipSubText: errorText || i18n("Translate with DeepL")
+    toolTipSubText: messageIsError ? messageText : i18n("Translate with DeepL")
     preferredRepresentation: compactRepresentation
     Plasmoid.backgroundHints: PlasmaCore.Types.NoBackground
     Plasmoid.contextualActions: []
@@ -157,31 +167,39 @@ PlasmoidItem {
 
             if (root.configuringKey) {
                 root.configuringKey = false
-                root.errorText = exitCode === 0
+                root.messageIsError = exitCode !== 0 && exitCode !== 2
+                root.messageText = exitCode === 0
                     ? i18n("API key saved in the system keyring.")
-                    : i18n("The API key could not be saved.")
+                    : (exitCode === 2
+                        ? i18n("API key setup was canceled.")
+                        : (stderr || i18n("The API key could not be saved.")))
                 return
             }
 
             if (!stdout) {
-                root.errorText = stderr || i18n("The translation helper returned no response.")
+                root.messageIsError = true
+                root.messageText = stderr || i18n("The translation helper returned no response.")
                 return
             }
 
             try {
                 const response = JSON.parse(stdout)
                 if (Number(response.request_id) !== root.requestId ||
-                        root.activeRequestText !== root.currentInputText)
+                        root.activeRequestText !== root.currentInputText ||
+                        root.activeRequestTargetLanguage !== root.targetLanguage)
                     return
                 if (!response.ok) {
                     root.resultText = ""
-                    root.errorText = root.formatError(response.error_code, response.error)
+                    root.messageIsError = true
+                    root.messageText = root.formatError(response.error_code, response.error)
                     return
                 }
-                root.errorText = ""
+                root.messageText = ""
+                root.messageIsError = false
                 root.resultText = response.translation || ""
             } catch (error) {
-                root.errorText = i18n("The DeepL helper returned an invalid response.")
+                root.messageIsError = true
+                root.messageText = i18n("The DeepL helper returned an invalid response.")
             }
         }
     }
@@ -191,6 +209,18 @@ PlasmoidItem {
         interval: root.debounceMilliseconds
         repeat: false
         onTriggered: root.translateNow()
+    }
+
+    Timer {
+        id: copyFeedbackTimer
+        interval: 1600
+        repeat: false
+        onTriggered: root.copyFeedbackVisible = false
+    }
+
+    Component.onCompleted: {
+        if (!TargetLanguages.contains(Plasmoid.configuration.targetLanguage))
+            Plasmoid.configuration.targetLanguage = "EN-US"
     }
 
     compactRepresentation: Item {
@@ -217,7 +247,6 @@ PlasmoidItem {
                 Layout.alignment: Qt.AlignVCenter
                 text: "DeepL"
                 color: Kirigami.Theme.textColor
-                font.family: "Zalando Sans"
                 font.pixelSize: 12
                 font.weight: Font.Medium
             }
@@ -251,13 +280,12 @@ PlasmoidItem {
                     font.bold: true
                 }
 
-                ComboBox {
+                TargetLanguagePicker {
                     id: targetSelector
                     Layout.fillWidth: true
-                    model: root.targetLanguageLabels
-                    currentIndex: root.targetLanguageCodes.indexOf(root.targetLanguage)
-                    onActivated: root.setTargetLanguage(root.targetLanguageCodes[currentIndex])
-                    Accessible.name: i18n("Target language")
+                    selectedCode: root.targetLanguage
+                    enabled: !root.busy
+                    onLanguageSelected: (code) => root.setTargetLanguage(code)
                 }
 
                 PlasmaComponents.BusyIndicator {
@@ -271,6 +299,7 @@ PlasmoidItem {
                     icon.name: "configure"
                     text: i18n("Configure API key")
                     display: PlasmaComponents.AbstractButton.IconOnly
+                    enabled: !root.busy
                     onClicked: root.configureKey()
                 }
             }
@@ -285,6 +314,13 @@ PlasmoidItem {
                     wrapMode: TextArea.Wrap
                     selectByMouse: true
                     onTextChanged: root.handleInputChanged(text)
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Return &&
+                                (event.modifiers & Qt.ControlModifier)) {
+                            root.translateNow()
+                            event.accepted = true
+                        }
+                    }
                 }
             }
 
@@ -308,8 +344,10 @@ PlasmoidItem {
 
             PlasmaComponents.Label {
                 Layout.fillWidth: true
-                text: root.errorText
-                color: Kirigami.Theme.negativeTextColor
+                text: root.messageText
+                color: root.messageIsError
+                    ? Kirigami.Theme.negativeTextColor
+                    : Kirigami.Theme.positiveTextColor
                 wrapMode: Text.WordWrap
                 visible: text.length > 0
             }
@@ -331,13 +369,15 @@ PlasmoidItem {
 
             PlasmaComponents.Button {
                 Layout.alignment: Qt.AlignRight
-                text: i18n("Copy translation")
+                text: root.copyFeedbackVisible ? i18n("Copied") : i18n("Copy translation")
                 icon.name: "edit-copy"
                 enabled: root.resultText.length > 0
                 onClicked: {
                     resultTextArea.selectAll()
                     resultTextArea.copy()
                     resultTextArea.deselect()
+                    root.copyFeedbackVisible = true
+                    copyFeedbackTimer.restart()
                 }
             }
         }

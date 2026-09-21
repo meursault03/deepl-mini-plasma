@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import org.kde.kcmutils as KCM
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.plasma5support as Plasma5Support
+import "Command.js" as Command
 
 KCM.SimpleKCM {
     id: root
@@ -16,8 +17,8 @@ KCM.SimpleKCM {
 
     readonly property string helperPath: Qt.resolvedUrl("../scripts/deepl-mini.py")
         .toString().replace(/^file:\/\//, "")
-    readonly property string setupCommand: "python3 \"" + helperPath + "\" --setup"
-    readonly property string keyStatusCommand: "python3 \"" + helperPath + "\" --key-status"
+    readonly property string setupCommand: Command.build(["python3", helperPath, "--setup"])
+    readonly property string keyStatusCommand: Command.build(["python3", helperPath, "--key-status"])
 
     function run(command) {
         if (activeCommand)
@@ -57,10 +58,12 @@ KCM.SimpleKCM {
             root.busy = false
 
             if (wasSetup) {
-                root.statusIsError = exitCode !== 0
+                root.statusIsError = exitCode !== 0 && exitCode !== 2
                 root.statusText = exitCode === 0
                     ? i18n("API key saved in the system keyring.")
-                    : (stderr || i18n("The API key could not be saved."))
+                    : (exitCode === 2
+                        ? i18n("API key setup was canceled.")
+                        : (stderr || i18n("The API key could not be saved.")))
                 if (exitCode === 0)
                     root.checkKeyring()
                 return

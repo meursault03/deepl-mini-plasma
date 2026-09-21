@@ -5,3 +5,4 @@ dist/
 .directory
 .idea/
 .vscode/
+.pytest_cache/

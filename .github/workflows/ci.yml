@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install verification tools
+        run: >-
+          pacman -Syu --noconfirm --needed
+          git python qt6-declarative libplasma plasma5support kcmutils kirigami
+          kpackage libxml2
+      - name: Run helper and catalog tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate QML and configuration schema
+        run: >-
+          xmllint --noout contents/config/main.xml &&
+          /usr/lib/qt6/bin/qmllint contents/ui/*.qml
+      - name: Validate Plasma package installation
+        run: >-
+          kpackagetool6 --type Plasma/Applet --install "$GITHUB_WORKSPACE" &&
+          kpackagetool6 --type Plasma/Applet --show io.meursault.panel.deeplqt &&
+          kpackagetool6 --type Plasma/Applet --remove io.meursault.panel.deeplqt
