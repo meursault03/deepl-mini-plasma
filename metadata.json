@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [{ "Name": "meursault03" }],
+        "Category": "Language",
+        "Description": "Lightweight DeepL translator using the native Plasma popup",
+        "Icon": "translate",
+        "Id": "io.meursault.panel.deeplqt",
+        "License": "MIT",
+        "Name": "DeepL Mini",
+        "Version": "3.1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
